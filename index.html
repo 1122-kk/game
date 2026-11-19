@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>남극 탈출: 공룡이 나타났다!</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1426; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  canvas { display: block; max-width: 100vw; max-height: 100vh; aspect-ratio: 16 / 9; width: 100vw; touch-action: none; border-radius: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540"></canvas>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const W = 960, H = 540;
+  const GROUND = H - 90;
+  const PX = 380;               // player screen x
+  const CATCH_GAP = 70;         // dino catches you below this
+  const MAX_GAP = 430;
+
+  let best = 0;
+  try { best = +localStorage.getItem('antarcticDinoBest') || 0; } catch (e) {}
+
+  // ---------- state ----------
+  let state, player, obstacles, fishes, particles, snow, gap, speed, dist, time,
+      nextSpawn, nextFish, shake, roarT, hurtT, msg, msgT, worldX, groundHoles;
+
+  function reset() {
+    player = { y: GROUND, vy: 0, onGround: true, slide: 0, run: 0, jumps: 0 };
+    obstacles = []; fishes = []; particles = []; groundHoles = [];
+    gap = 320; speed = 380; dist = 0; time = 0; worldX = 0;
+    nextSpawn = 700; nextFish = 500; shake = 0; roarT = 2; hurtT = 0;
+    msg = ''; msgT = 0;
+  }
+  snow = Array.from({ length: 110 }, () => ({
+    x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2 + 0.6, s: Math.random() * 40 + 30
+  }));
+  reset();
+  state = 'title';
+
+  // ---------- input ----------
+  const keys = {};
+  function jump() {
+    if (state !== 'play') return start();
+    if (player.onGround) { player.vy = -830; player.onGround = false; player.jumps = 1; puff(PX, GROUND, 6); }
+    else if (player.jumps === 1) { player.vy = -680; player.jumps = 2; puff(PX, player.y, 4); }
+  }
+  function start() {
+    if (state === 'title' || state === 'over') { reset(); state = 'play'; flash('공룡이 쫓아온다! 도망쳐!', 2); }
+  }
+  addEventListener('keydown', e => {
+    if (['Space', 'ArrowUp', 'ArrowDown', 'KeyW', 'KeyS'].includes(e.code)) e.preventDefault();
+    if (e.repeat) return;
+    keys[e.code] = true;
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') jump();
+    if (e.code === 'Enter') start();
+    if (e.code === 'KeyP' && (state === 'play' || state === 'pause')) state = state === 'play' ? 'pause' : 'play';
+  });
+  addEventListener('keyup', e => { keys[e.code] = false; });
+  let touchSlide = false;
+  cv.addEventListener('pointerdown', e => {
+    const r = cv.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * W;
+    if (state !== 'play') return start();
+    if (x < W / 2) touchSlide = true; else jump();
+  });
+  addEventListener('pointerup', () => { touchSlide = false; });
+  addEventListener('pointercancel', () => { touchSlide = false; });
+
+  function flash(t, d) { msg = t; msgT = d; }
+  function puff(x, y, n, col = '#fff') {
+    for (let i = 0; i < n; i++) particles.push({
+      x, y, vx: (Math.random() - 0.5) * 200, vy: -Math.random() * 160, life: 0.6, max: 0.6, col, r: Math.random() * 3 + 2
+    });
+  }
+
+  // ---------- spawning ----------
+  function spawn() {
+    const lvl = Math.min(1, time / 90);
+    const r = Math.random();
+    const x = W + 60;
+    if (r < 0.38) {
+      const h = 34 + Math.random() * 26;
+      obstacles.push({ type: 'ice', x, w: 44 + Math.random() * 20, h, y: GROUND - h });
+    } else if (r < 0.58) {
+      obstacles.push({ type: 'skua', x, w: 54, h: 26, y: GROUND - 78 - Math.random() * 8, flap: Math.random() * 6 });
+    } else if (r < 0.75) {
+      const w = 80 + Math.random() * 40 * (0.5 + lvl);
+      groundHoles.push({ x, w });
+    } else if (r < 0.9) {
+      obstacles.push({ type: 'seal', x, w: 70, h: 30, y: GROUND - 30 });
+    } else {
+      obstacles.push({ type: 'icicle', x, w: 30, h: 0, y: -40, fall: false, vy: 0 });
+    }
+    nextSpawn = (420 + Math.random() * 420) * (1 - lvl * 0.3);
+  }
+
+  // ---------- update ----------
+  function hit(amount, text) {
+    if (hurtT > 0) return;
+    gap -= amount; hurtT = 1.1; shake = 0.35;
+    flash(text, 1.2);
+    puff(PX, player.y - 30, 12, '#bfe6ff');
+  }
+
+  function update(dt) {
+    for (const s of snow) {
+      s.y += s.s * dt; s.x -= (state === 'play' ? speed * 0.15 : 20) * dt;
+      if (s.y > H) { s.y = -5; s.x = Math.random() * W; }
+      if (s.x < 0) s.x += W;
+    }
+    particles = particles.filter(p => (p.life -= dt) > 0);
+    for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; }
+    if (shake > 0) shake -= dt;
+    if (msgT > 0) msgT -= dt;
+    if (state !== 'play') { worldX += 60 * dt; return; }
+
+    time += dt;
+    speed = Math.min(900, 380 + time * 7);
+    const dx = speed * dt;
+    dist += dx; worldX += dx;
+    if (hurtT > 0) hurtT -= dt;
+
+    // dino closes in slowly, faster over time
+    gap -= (7 + time * 0.12) * dt;
+    roarT -= dt;
+    if (roarT <= 0) { roarT = 5 + Math.random() * 5; shake = 0.4; flash('크아아앙!!', 1); }
+
+    // player physics
+    const sliding = (keys.ArrowDown || keys.KeyS || touchSlide) && player.onGround;
+    player.slide = sliding ? 1 : 0;
+    if (!player.onGround && (keys.ArrowDown || keys.KeyS || touchSlide)) player.vy += 2600 * dt; // fast fall
+    player.vy += 2300 * dt;
+    player.y += player.vy * dt;
+
+    const overHole = groundHoles.some(h => PX > h.x + 8 && PX < h.x + h.w - 8);
+    if (player.y >= GROUND && !overHole && player.y < GROUND + 30) {
+      if (!player.onGround) puff(PX, GROUND, 4);
+      player.y = GROUND; player.vy = 0; player.onGround = true; player.jumps = 0;
+    } else if (player.y > GROUND) {
+      player.onGround = false;
+    }
+    if (player.y > GROUND + 60) {           // fell into crevasse -> climb out, lose ground
+      hurtT = 0; hit(110, '크레바스에 빠졌다!');
+      player.y = GROUND - 10; player.vy = -900; player.onGround = false; player.jumps = 1;
+    }
+    player.run += dt * speed / 40;
+
+    // spawn
+    nextSpawn -= dx; if (nextSpawn <= 0) spawn();
+    nextFish -= dx;
+    if (nextFish <= 0) {
+      fishes.push({ x: W + 40, y: GROUND - 40 - Math.random() * 130, t: 0 });
+      nextFish = 500 + Math.random() * 700;
+    }
+
+    // player box
+    const ph = player.slide ? 28 : 58, pw = player.slide ? 50 : 30;
+    const box = { x: PX - pw / 2, y: player.y - ph, w: pw, h: ph };
+    const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+    for (const o of obstacles) {
+      o.x -= dx;
+      if (o.type === 'skua') { o.x -= 120 * dt; o.flap += dt * 14; }
+      if (o.type === 'icicle') {
+        if (!o.fall && o.x < PX + 170) o.fall = true;
+        if (o.fall) { o.vy += 1500 * dt; o.y += o.vy * dt; }
+        if (o.y > GROUND - 40) { o.y = GROUND - 40; o.done = true; }
+        o.h = 40;
+      }
+      if (!o.hitDone && overlap(box, { x: o.x + 6, y: o.y + 4, w: o.w - 12, h: o.h - 6 })) {
+        o.hitDone = true;
+        const t = { ice: '얼음 덩어리에 걸렸다!', skua: '도둑갈매기에 부딪혔다!', seal: '물범을 밟고 미끄러졌다!', icicle: '고드름에 맞았다!' }[o.type];
+        hit(o.type === 'seal' ? 80 : 95, t);
+      }
+    }
+    obstacles = obstacles.filter(o => o.x > -120);
+    for (const h of groundHoles) h.x -= dx;
+    groundHoles = groundHoles.filter(h => h.x + h.w > -50);
+
+    for (const f of fishes) {
+      f.x -= dx; f.t += dt;
+      if (!f.got && Math.abs(f.x - PX) < 30 && Math.abs(f.y - (player.y - ph / 2)) < 38) {
+        f.got = true; gap = Math.min(MAX_GAP, gap + 45);
+        puff(f.x, f.y, 10, '#ffd34d'); flash('물고기 냠! 기운이 난다 +', 0.8);
+      }
+    }
+    fishes = fishes.filter(f => f.x > -40 && !f.got);
+
+    if (gap < CATCH_GAP) {
+      state = 'over'; shake = 0.8;
+      const m = Math.floor(dist / 10);
+      if (m > best) { best = m; try { localStorage.setItem('antarcticDinoBest', best); } catch (e) {} }
+    }
+  }
+
+  // ---------- drawing ----------
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0b1a3a'); g.addColorStop(0.55, '#2b4f7e'); g.addColorStop(1, '#9cc6e8');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // aurora
+    ctx.save(); ctx.globalAlpha = 0.35;
+    for (let k = 0; k < 3; k++) {
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 20) {
+        const y = 70 + k * 28 + Math.sin(x * 0.008 + performance.now() * 0.0004 + k) * 25;
+        x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, 0); ctx.lineTo(0, 0); ctx.closePath();
+      ctx.fillStyle = ['#3cffb0', '#5ad1ff', '#b07cff'][k]; ctx.fill();
+    }
+    ctx.restore();
+
+    // mountains (parallax)
+    mountains(0.08, '#5f7fa6', 230, 140);
+    mountains(0.2, '#87a8cc', 300, 90);
+    // ground
+    ctx.fillStyle = '#eaf6ff'; ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#cfe5f5'; ctx.fillRect(0, GROUND, W, 6);
+    for (let i = 0; i < 14; i++) {
+      const x = ((i * 120 - worldX) % (W + 120) + W + 120) % (W + 120) - 60;
+      ctx.fillStyle = '#d6eaf8'; ctx.fillRect(x, GROUND + 28 + (i % 3) * 14, 50, 3);
+    }
+    // crevasses
+    for (const h of groundHoles) {
+      const cg = ctx.createLinearGradient(0, GROUND, 0, H);
+      cg.addColorStop(0, '#2a6fa3'); cg.addColorStop(1, '#06223d');
+      ctx.fillStyle = cg;
+      ctx.beginPath();
+      ctx.moveTo(h.x, GROUND); ctx.lineTo(h.x + h.w, GROUND);
+      ctx.lineTo(h.x + h.w * 0.65, H); ctx.lineTo(h.x + h.w * 0.35, H); ctx.closePath(); ctx.fill();
+    }
+  }
+  function mountains(par, col, base, amp) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, GROUND);
+    const off = worldX * par;
+    for (let x = 0; x <= W + 20; x += 20) {
+      const t = (x + off) * 0.004;
+      const y = base + 40 - Math.abs(Math.sin(t) * amp) - Math.abs(Math.sin(t * 2.3 + 1)) * amp * 0.4;
+      ctx.lineTo(x, Math.min(GROUND, y + 80));
+    }
+    ctx.lineTo(W, GROUND); ctx.closePath(); ctx.fill();
+  }
+
+  function drawPlayer() {
+    if (hurtT > 0 && Math.floor(hurtT * 14) % 2 === 0) return;
+    const x = PX, y = player.y;
+    ctx.save(); ctx.translate(x, y);
+    if (player.slide) {
+      ctx.fillStyle = '#d33b2c'; roundRect(-26, -26, 52, 22, 10); ctx.fill();
+      ctx.fillStyle = '#ffe0c2'; ctx.beginPath(); ctx.arc(20, -22, 9, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(20, -22, 11, Math.PI * 1.1, Math.PI * 2.1); ctx.lineWidth = 4; ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.fillStyle = '#333'; ctx.fillRect(-28, -8, 16, 6);
+    } else {
+      const s = Math.sin(player.run) * (player.onGround ? 1 : 0.3);
+      // legs
+      ctx.strokeStyle = '#2b3445'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-4, -18); ctx.lineTo(-4 + s * 10, -2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(4, -18); ctx.lineTo(4 - s * 10, -2); ctx.stroke();
+      // body (parka)
+      ctx.fillStyle = '#d33b2c'; roundRect(-15, -48, 30, 34, 10); ctx.fill();
+      ctx.fillStyle = '#f2c94c'; ctx.fillRect(-15, -30, 30, 4);
+      // arms
+      ctx.strokeStyle = '#b52e22'; ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.moveTo(-10, -42); ctx.lineTo(-18 - s * 6, -26); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(10, -42); ctx.lineTo(18 + s * 6, -28); ctx.stroke();
+      // head + hood
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(2, -56, 13, 0, 7); ctx.fill();
+      ctx.fillStyle = '#ffe0c2'; ctx.beginPath(); ctx.arc(4, -56, 9, 0, 7); ctx.fill();
+      ctx.fillStyle = '#222'; ctx.fillRect(6, -59, 3, 3);
+      // scared mouth
+      ctx.beginPath(); ctx.arc(8, -51, 2.2, 0, 7); ctx.fill();
+      // sweat
+      ctx.fillStyle = '#9fd8ff'; ctx.beginPath(); ctx.arc(-8, -66 - (time * 30 % 8), 2.5, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawDino() {
+    const x = PX - gap;            // nose position
+    const by = GROUND;
+    const t = performance.now() / 1000;
+    const step = Math.sin(t * 14);
+    const bob = Math.abs(step) * 4;
+    ctx.save(); ctx.translate(x, by - bob);
+    const body = '#4f8a3a', dark = '#3a6a2a', belly = '#a8c46a';
+    // tail
+    ctx.fillStyle = body; ctx.beginPath();
+    ctx.moveTo(-130, -95); ctx.quadraticCurveTo(-260, -120, -330, -90); ctx.quadraticCurveTo(-250, -80, -120, -60); ctx.fill();
+    // back leg
+    ctx.fillStyle = dark;
+    ctx.save(); ctx.translate(-90, -70); ctx.rotate(step * 0.45);
+    roundRect(-14, 0, 30, 70, 12); ctx.fill(); ctx.fillRect(-4, 60, 34, 10); ctx.restore();
+    // body
+    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(-80, -110, 80, 52, -0.25, 0, 7); ctx.fill();
+    ctx.fillStyle = belly; ctx.beginPath(); ctx.ellipse(-60, -90, 50, 26, -0.3, 0, 7); ctx.fill();
+    // front leg
+    ctx.fillStyle = body;
+    ctx.save(); ctx.translate(-60, -75); ctx.rotate(-step * 0.45);
+    roundRect(-14, 0, 30, 72, 12); ctx.fill(); ctx.fillRect(-4, 62, 36, 10); ctx.restore();
+    // neck + head
+    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(-20, -160, 34, 40, 0.4, 0, 7); ctx.fill();
+    const jaw = (Math.sin(t * 6) + 1) * 0.12 + (roarT > 4.5 ? 0.35 : 0);
+    ctx.beginPath(); roundRect(-30, -205, 85, 42, 14); ctx.fill();
+    ctx.save(); ctx.translate(-10, -168); ctx.rotate(jaw);
+    ctx.fillStyle = dark; roundRect(0, -4, 62, 18, 8); ctx.fill();
+    ctx.fillStyle = '#fff'; for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.moveTo(14 + i * 10, -4); ctx.lineTo(19 + i * 10, -4); ctx.lineTo(16.5 + i * 10, 4); ctx.fill(); }
+    ctx.restore();
+    ctx.fillStyle = '#fff'; for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.moveTo(14 + i * 11, -163); ctx.lineTo(20 + i * 11, -163); ctx.lineTo(17 + i * 11, -155); ctx.fill(); }
+    // eye
+    ctx.fillStyle = '#ffde3b'; ctx.beginPath(); ctx.arc(20, -192, 7, 0, 7); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.fillRect(21, -196, 3, 9);
+    ctx.strokeStyle = dark; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(8, -204); ctx.lineTo(30, -199); ctx.stroke();
+    // tiny arm
+    ctx.strokeStyle = dark; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-20, -115); ctx.lineTo(0, -105 + step * 4); ctx.lineTo(8, -112); ctx.stroke();
+    // spikes
+    ctx.fillStyle = dark;
+    for (let i = 0; i < 6; i++) { const sx = -150 + i * 22, sy = -150 + i * -4 + (i > 3 ? 0 : 6); ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + 10, sy - 16); ctx.lineTo(sx + 20, sy); ctx.fill(); }
+    // snow kicked up
+    ctx.restore();
+    if (state === 'play' && Math.random() < 0.4) puff(x - 70, GROUND, 1);
+  }
+
+  function drawObstacles() {
+    for (const o of obstacles) {
+      if (o.type === 'ice') {
+        ctx.fillStyle = '#a9dcf5'; roundRect(o.x, o.y, o.w, o.h, 6); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillRect(o.x + 6, o.y + 5, 6, o.h - 14);
+        ctx.strokeStyle = '#6fb6dc'; ctx.lineWidth = 2; roundRect(o.x, o.y, o.w, o.h, 6); ctx.stroke();
+      } else if (o.type === 'skua') {
+        const f = Math.sin(o.flap) * 12;
+        ctx.fillStyle = '#6b5a4a';
+        ctx.beginPath(); ctx.ellipse(o.x + 27, o.y + 14, 20, 9, 0, 0, 7); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(o.x + 20, o.y + 12); ctx.lineTo(o.x + 34, o.y + 12 - 18 - f); ctx.lineTo(o.x + 40, o.y + 12); ctx.fill();
+        ctx.beginPath(); ctx.arc(o.x + 8, o.y + 10, 7, 0, 7); ctx.fill();
+        ctx.fillStyle = '#222'; ctx.beginPath(); ctx.moveTo(o.x + 2, o.y + 9); ctx.lineTo(o.x - 6, o.y + 12); ctx.lineTo(o.x + 2, o.y + 13); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.fillRect(o.x + 6, o.y + 7, 2, 2);
+      } else if (o.type === 'seal') {
+        ctx.fillStyle = '#7b8794';
+        ctx.beginPath(); ctx.ellipse(o.x + 35, o.y + 18, 35, 13, 0, 0, 7); ctx.fill();
+        ctx.beginPath(); ctx.arc(o.x + 6, o.y + 10, 11, 0, 7); ctx.fill();
+        ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(o.x + 2, o.y + 7, 2, 0, 7); ctx.fill();
+        ctx.fillStyle = '#5c6670'; ctx.beginPath(); ctx.moveTo(o.x + 66, o.y + 18); ctx.lineTo(o.x + 78, o.y + 8); ctx.lineTo(o.x + 78, o.y + 28); ctx.fill();
+      } else if (o.type === 'icicle') {
+        ctx.fillStyle = '#c8ecff'; ctx.beginPath();
+        ctx.moveTo(o.x, o.y); ctx.lineTo(o.x + o.w, o.y); ctx.lineTo(o.x + o.w / 2, o.y + 40); ctx.fill();
+        if (!o.fall) { ctx.fillStyle = 'rgba(255,80,80,0.6)'; ctx.font = 'bold 20px sans-serif'; ctx.fillText('!', o.x + 11, 30); }
+      }
+    }
+    for (const f of fishes) {
+      const y = f.y + Math.sin(f.t * 4) * 5;
+      ctx.fillStyle = '#ffb627';
+      ctx.beginPath(); ctx.ellipse(f.x, y, 14, 7, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(f.x + 12, y); ctx.lineTo(f.x + 22, y - 7); ctx.lineTo(f.x + 22, y + 7); ctx.fill();
+      ctx.fillStyle = '#222'; ctx.fillRect(f.x - 8, y - 2, 2, 2);
+    }
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  function text(t, x, y, size, col = '#fff', align = 'center') {
+    ctx.font = `bold ${size}px -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+    ctx.textAlign = align; ctx.lineWidth = Math.max(3, size / 7); ctx.strokeStyle = 'rgba(5,15,35,0.8)';
+    ctx.strokeText(t, x, y); ctx.fillStyle = col; ctx.fillText(t, x, y);
+  }
+
+  function drawHUD() {
+    text(`${Math.floor(dist / 10)} m`, 24, 44, 30, '#fff', 'left');
+    text(`최고 ${best} m`, 24, 74, 16, '#cfe8ff', 'left');
+    // danger meter
+    const danger = 1 - (gap - CATCH_GAP) / (MAX_GAP - CATCH_GAP);
+    const mx = W - 284, my = 24;
+    text('공룡과의 거리', mx, my + 14, 15, '#fff', 'left');
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; roundRect(mx, my + 22, 260, 16, 8); ctx.fill();
+    const col = danger > 0.7 ? '#ff4d4d' : danger > 0.4 ? '#ffb627' : '#4dd88a';
+    ctx.fillStyle = col; roundRect(mx, my + 22, Math.max(16, 260 * (1 - danger)), 16, 8); ctx.fill();
+    if (danger > 0.7 && state === 'play' && Math.floor(performance.now() / 250) % 2) text('위험!', W / 2, 120, 34, '#ff5a5a');
+    if (msgT > 0 && state === 'play') { ctx.globalAlpha = Math.min(1, msgT * 2); text(msg, W / 2, 170, 26, '#fff7c2'); ctx.globalAlpha = 1; }
+  }
+
+  function overlay(lines) {
+    ctx.fillStyle = 'rgba(6,16,36,0.55)'; ctx.fillRect(0, 0, W, H);
+    lines.forEach(([t, s, c], i) => text(t, W / 2, 150 + lines.slice(0, i).reduce((a, l) => a + l[1] + 22, 0), s, c));
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake > 0) ctx.translate((Math.random() - 0.5) * 14 * shake, (Math.random() - 0.5) * 14 * shake);
+    drawBackground();
+    drawObstacles();
+    drawPlayer();
+    if (state !== 'title') drawDino();
+    for (const p of particles) { ctx.globalAlpha = p.life / p.max; ctx.fillStyle = p.col; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    for (const s of snow) { ctx.globalAlpha = 0.8; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    if (state !== 'title') drawHUD();
+    if (state === 'title') overlay([
+      ['🦖 남극 탈출 🧊', 56, '#fff'],
+      ['얼음 대륙에 공룡이 깨어났다! 최대한 멀리 도망쳐라!', 22, '#cfe8ff'],
+      ['스페이스 / ↑ : 점프 (공중에서 한 번 더!)    ↓ : 슬라이딩', 18, '#fff7c2'],
+      ['모바일: 화면 오른쪽 = 점프, 왼쪽 누르기 = 슬라이딩', 16, '#cfe8ff'],
+      ['얼음·물범·크레바스는 뛰어넘고, 도둑갈매기는 슬라이딩으로!', 16, '#cfe8ff'],
+      ['🐟 물고기를 먹으면 공룡과 거리가 벌어진다', 16, '#ffd34d'],
+      ['클릭 또는 Enter로 시작', 26, '#7dffb5'],
+    ]);
+    if (state === 'over') overlay([
+      ['잡혔다! 🦖', 60, '#ff6b6b'],
+      [`도망친 거리: ${Math.floor(dist / 10)} m`, 30, '#fff'],
+      [`최고 기록: ${best} m`, 22, '#cfe8ff'],
+      ['클릭 또는 Enter로 다시 도망치기', 24, '#7dffb5'],
+    ]);
+    if (state === 'pause') overlay([['일시정지', 48, '#fff'], ['P를 눌러 계속', 22, '#cfe8ff']]);
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    if (state !== 'pause') update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
